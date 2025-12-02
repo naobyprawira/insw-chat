@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  exim-chat:
+    build: .
+    container_name: exim-chat
+    ports:
+      - "8504:8504"
+    volumes:
+      - ./chat_history.db:/app/chat_history.db
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    restart: unless-stopped

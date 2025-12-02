@@ -1,92 +1,36 @@
 import streamlit as st
-from modules import database
+from modules import database, chatbot_utils, app_logger
 from datetime import datetime
 import os
 from typing import List, Dict, Any
 from dotenv import load_dotenv
-from google import genai
 from qdrant_client import QdrantClient
 from qdrant_client.models import Prefetch, FusionQuery
 
 load_dotenv()
 
-# CSS for compact action buttons
-st.markdown("""
-    <style>
-        .action-btn-container {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .action-btn-container button {
-            padding: 0.2rem 0.35rem !important;
-            height: 1.6rem !important;
-            min-height: 1.6rem !important;
-            width: auto !important;
-            font-size: 0.95rem !important;
-            line-height: 1 !important;
-        }
-    </style>
-""", unsafe_allow_html=True)
+# Initialize Gemini Client
+client = chatbot_utils.init_gemini_client()
 
-def generate_session_title(user_message):
-    """
-    Dummy helper function to generate session title from first user message
-    In production, this would use LLM to generate a concise topic/title
-    """
-    # Simple dummy: just use first few words or truncate
-    words = user_message.split()
-    if len(words) <= 5:
-        return user_message
-    else:
-        return " ".join(words[:5]) + "..."
+# Setup loggers
+logger = app_logger.setup_logger()
+llm_logger = app_logger.setup_llm_logger()
 
-def _create_embedding(text: str) -> List[float]:
-    """Create embedding using Gemini"""
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
-    embedding_model = os.getenv('EMBEDDING_MODEL', 'models/gemini-embedding-001')
-    
-    client = genai.Client(api_key=gemini_api_key)
-    result = client.models.embed_content(
-        model=embedding_model,
-        contents=text
-    )
-    return result.embeddings[0].values
-
-
-def _create_sparse_vector(text: str) -> Dict[str, List]:
-    """Create simple BM25-like sparse vector"""
-    words = text.lower().split()
-    word_freq = {}
-    
-    for word in words:
-        if len(word) > 2:
-            word_freq[word] = word_freq.get(word, 0) + 1
-    
-    indices = []
-    values = []
-    
-    for word, freq in word_freq.items():
-        index = hash(word) % (2**32)
-        indices.append(index)
-        values.append(float(freq))
-    
-    return {
-        "indices": indices,
-        "values": values
-    }
-
+# Initialize Qdrant Client (Global/Cached)
+@st.cache_resource
+def get_qdrant_client():
+    url = os.getenv('SOP_QDRANT_URL')
+    api_key = os.getenv('SOP_QDRANT_API_KEY')
+    return QdrantClient(url=url, api_key=api_key)
 
 def _search_sop_collection(query_vector: List[float], query_text: str, limit: int = 3) -> List[Dict[str, Any]]:
     """Search SOP documents collection with hybrid search"""
-    qdrant_url = os.getenv('SOP_QDRANT_URL')
-    qdrant_api_key = os.getenv('SOP_QDRANT_API_KEY')
     collection_name = os.getenv('SOP_QDRANT_COLLECTION_NAME', 'sop_documents')
     
-    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-    sparse_vector = _create_sparse_vector(query_text)
+    qdrant_client = get_qdrant_client()
+    sparse_vector = chatbot_utils.create_sparse_vector(query_text)
     
-    results = client.query_points(
+    results = qdrant_client.query_points(
         collection_name=collection_name,
         prefetch=[
             Prefetch(query=query_vector, using="dense", limit=limit * 2),
@@ -116,15 +60,13 @@ def _search_sop_collection(query_vector: List[float], query_text: str, limit: in
 
 def _search_cases_collection(query_vector: List[float], query_text: str, limit: int = 2) -> List[Dict[str, Any]]:
     """Search cases Q&A collection with hybrid search"""
-    qdrant_url = os.getenv('CASES_QDRANT_URL')
-    qdrant_api_key = os.getenv('CASES_QDRANT_API_KEY')
     collection_name = os.getenv('CASES_QDRANT_COLLECTION_NAME', 'cases_qna')
     
-    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-    sparse_vector = _create_sparse_vector(query_text)
+    qdrant_client = get_qdrant_client()
+    sparse_vector = chatbot_utils.create_sparse_vector(query_text)
     
     try:
-        results = client.query_points(
+        results = qdrant_client.query_points(
             collection_name=collection_name,
             prefetch=[
                 Prefetch(query=query_vector, using="dense", limit=limit * 2),
@@ -146,6 +88,7 @@ def _search_cases_collection(query_vector: List[float], query_text: str, limit: 
         
         return formatted_results
     except Exception as e:
+        logger.error(f"Error searching cases collection: {str(e)}")
         print(f"Error searching cases collection: {str(e)}")
         return []
 
@@ -194,10 +137,7 @@ def _build_context(sop_results: List[Dict], case_results: List[Dict]) -> str:
 
 def _generate_llm_response(user_query: str, context: str) -> str:
     """Generate response using Gemini LLM"""
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
     llm_model = os.getenv('LLM_MODEL', 'gemini-2.5-flash')
-    
-    client = genai.Client(api_key=gemini_api_key)
     
     system_prompt = """Anda adalah Asisten SOP EXIM untuk operasi ekspor-impor.
 
@@ -215,9 +155,9 @@ Format Jawaban:
 3. Daftar Dokumen yang Dibutuhkan (HANYA ambil dari field "Dokumen" yang tersedia di konteks, jangan buat daftar sendiri. Perbaiki kapitalisasi dengan benar: huruf besar untuk awal kata penting, bukan semua huruf besar)
 4. Referensi ke kasus historis (jika relevan)
 5. Sitasi dokumen menggunakan format dengan hyperlink: [TYPE DOC_NO SOP_TITLE](webUrl)
-   Contoh: [SOP 17.1 Pemasukan Tooling](https://url-link)
-   Format hyperlink Markdown yang benar: [Teks yang ditampilkan](URL lengkap)
-   Perbaiki kapitalisasi judul: huruf besar untuk awal kata penting, bukan semua huruf besar
+    Contoh: [SOP 17.1 Pemasukan Tooling](https://url-link)
+    Format hyperlink Markdown yang benar: [Teks yang ditampilkan](URL lengkap)
+    Perbaiki kapitalisasi judul: huruf besar untuk awal kata penting, bukan semua huruf besar
 
 Jika ada lebih dari satu dokumen SOP yang relevan:
 - Analisis kombinasi informasi dari semua dokumen
@@ -243,6 +183,7 @@ Pertanyaan Pengguna: {user_query}
 Berikan jawaban yang komprehensif berdasarkan konteks di atas."""
     
     try:
+        start_time = datetime.now()
         response = client.models.generate_content(
             model=llm_model,
             contents=[
@@ -251,41 +192,320 @@ Berikan jawaban yang komprehensif berdasarkan konteks di atas."""
                 {"role": "user", "parts": [{"text": user_message}]}
             ]
         )
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        # Log LLM analytics
+        llm_logger.info("SOP LLM Call", extra={
+            "query": user_query,
+            "duration": duration,
+            "model": llm_model,
+            "input_chars": len(system_prompt) + len(user_message),
+            "output_chars": len(response.text)
+        })
+        
         return response.text
     except Exception as e:
+        logger.error(f"Error generating response: {str(e)}", exc_info=True)
         return f"Error generating response: {str(e)}"
 
 
-def search_sop_exim(user_input: str) -> str:
+def _check_intent(user_input: str) -> dict:
     """
-    Main function for SOP Chatbot with RAG pipeline:
-    1. Create embedding from user query
-    2. Search both SOP and Cases collections
-    3. Build context from search results
-    4. Generate response with Gemini LLM
+    Check if user query is related to SOP/EXIM procedures using LLM.
+    Returns: {"is_relevant": bool, "reason": str, "confidence": str}
     """
+    llm_model = os.getenv('LLM_MODEL', 'gemini-2.5-flash')
+    
+    prompt = f"""Analisis apakah pertanyaan berikut terkait dengan Standard Operating Procedure (SOP) untuk ekspor-impor atau proses bisnis EXIM.
+
+Pertanyaan: "{user_input}"
+
+Kriteria SOP/EXIM:
+- Prosedur, proses, atau langkah-langkah operasional
+- Dokumen kepabeanan (BC 2.3, BC 2.5, dll)
+- Regulasi ekspor/impor
+- Kasus bisnis atau operasional perusahaan
+- Pertanyaan tentang "bagaimana", "apa prosedur", "dokumen apa"
+
+BUKAN SOP/EXIM:
+- Pertanyaan umum tidak terkait bisnis (cuaca, resep, hiburan)
+- Topik di luar ekspor-impor dan operasional bisnis
+
+Berikan jawaban dalam format JSON:
+{{
+  "is_relevant": true/false,
+  "reason": "penjelasan singkat",
+  "confidence": "high/medium/low"
+}}
+
+Hanya output JSON, tanpa teks tambahan."""
+
     try:
-        # 1. Create embedding
-        query_vector = _create_embedding(user_input)
+        start_time = datetime.now()
+        response = client.models.generate_content(
+            model=llm_model,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}]
+        )
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
         
-        # 2. Search both collections
-        sop_results = _search_sop_collection(query_vector, user_input, limit=3)
-        case_results = _search_cases_collection(query_vector, user_input, limit=2)
+        # Log LLM analytics
+        llm_logger.info("SOP Intent Check", extra={
+            "query": user_input,
+            "duration": duration,
+            "model": llm_model
+        })
         
-        # 3. Build context
-        context = _build_context(sop_results, case_results)
+        # Parse JSON response
+        import json
+        result_text = response.text.strip()
+        # Remove markdown code blocks if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
         
-        # 4. Generate response with LLM
-        response = _generate_llm_response(user_input, context)
+        result = json.loads(result_text.strip())
+        return result
+    except Exception as e:
+        logger.error(f"Error in intent check: {e}", exc_info=True)
+        print(f"Error in intent check: {e}")
+        # Default to allowing query if check fails
+        return {"is_relevant": True, "reason": "Error in classification", "confidence": "low"}
+
+
+def _judge_document_relevance(user_input: str, context: str) -> dict:
+    """
+    Judge if retrieved documents are relevant to answer the user query.
+    Returns: {"is_relevant": bool, "reason": str}
+    """
+    llm_model = os.getenv('LLM_MODEL', 'gemini-2.5-flash')
+    
+    prompt = f"""Evaluasi apakah dokumen yang ditemukan relevan untuk menjawab pertanyaan pengguna.
+
+Pertanyaan: "{user_input}"
+
+Dokumen yang ditemukan:
+{context}
+
+Kriteria Relevan:
+- Dokumen berisi informasi yang dapat menjawab pertanyaan
+- Ada prosedur, aturan, atau kasus yang sesuai dengan pertanyaan
+- Informasi cukup spesifik dan tidak terlalu umum
+
+Berikan jawaban dalam format JSON:
+{{
+  "is_relevant": true/false,
+  "reason": "penjelasan singkat mengapa relevan/tidak"
+}}
+
+Hanya output JSON, tanpa teks tambahan."""
+
+    try:
+        start_time = datetime.now()
+        response = client.models.generate_content(
+            model=llm_model,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}]
+        )
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
         
-        return response
+        # Log LLM analytics
+        llm_logger.info("SOP Relevance Check", extra={
+            "query": user_input,
+            "duration": duration,
+            "model": llm_model
+        })
+        
+        # Parse JSON response
+        import json
+        result_text = response.text.strip()
+        # Remove markdown code blocks if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        
+        result = json.loads(result_text.strip())
+        return result
+    except Exception as e:
+        logger.error(f"Error in relevance judgment: {e}", exc_info=True)
+        print(f"Error in relevance judgment: {e}")
+        # Default to allowing if check fails
+        return {"is_relevant": True, "reason": "Error in judgment"}
+
+
+def _filter_relevant_cases(user_input: str, cases: List[Dict]) -> List[Dict]:
+    """
+    Filter cases to only include those strictly relevant to the user query using LLM.
+    """
+    if not cases:
+        return []
+        
+    llm_model = os.getenv('LLM_MODEL', 'gemini-2.5-flash')
+    
+    # Prepare cases for prompt
+    cases_text = ""
+    for i, c in enumerate(cases):
+        cases_text += f"Case {i+1} (ID: {c.get('case_no')}):\nQ: {c.get('question')}\nA: {c.get('answer')}\n\n"
+        
+    prompt = f"""Analisis apakah kasus-kasus berikut SANGAT RELEVAN dengan pertanyaan pengguna.
+
+Pertanyaan Pengguna: "{user_input}"
+
+Daftar Kasus:
+{cases_text}
+
+Instruksi:
+1. Evaluasi setiap kasus. Apakah kasus ini membahas topik yang SAMA PERSIS atau SANGAT MIRIP dengan pertanyaan pengguna?
+2. Jika kasus hanya sedikit terkait atau topiknya berbeda, JANGAN dimasukkan.
+3. Kita ingin strict filtering. Lebih baik tidak menampilkan kasus daripada menampilkan yang tidak relevan.
+
+Output JSON list berisi ID kasus yang relevan. Contoh: ["10", "12"]. Jika tidak ada yang relevan, kembalikan list kosong [].
+
+Hanya output JSON."""
+
+    try:
+        start_time = datetime.now()
+        response = client.models.generate_content(
+            model=llm_model,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}]
+        )
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        # Log LLM analytics
+        llm_logger.info("SOP Case Filter", extra={
+            "query": user_input,
+            "duration": duration,
+            "model": llm_model
+        })
+        
+        # Parse JSON
+        import json
+        result_text = response.text.strip()
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        
+        relevant_ids = json.loads(result_text.strip())
+        
+        # Filter original list
+        filtered_cases = [c for c in cases if str(c.get('case_no')) in [str(rid) for rid in relevant_ids]]
+        
+        logger.info(f"Case Filter: {len(cases)} -> {len(filtered_cases)} relevant cases")
+        return filtered_cases
         
     except Exception as e:
+        logger.error(f"Error in case filtering: {e}", exc_info=True)
+        # On error, default to empty to be safe (strict)
+        return []
+
+def search_sop_exim(user_input: str) -> str:
+    """
+    Main function for SOP Chatbot with multi-step guardrail RAG pipeline
+    """
+    try:
+        # Step 1: Length guardrail
+        if not user_input or len(user_input.strip()) < 2:
+            return "Mohon masukkan kata kunci yang lebih spesifik."
+        
+        # Step 2: Intent classification
+        intent_result = _check_intent(user_input)
+        logger.info(f"SOP Intent Check: {intent_result} for query '{user_input}'")
+        print(f"Intent check: {intent_result}")
+        
+        # If clearly not SOP-related with high confidence, reject immediately
+        if not intent_result["is_relevant"] and intent_result["confidence"] == "high":
+            logger.info(f"SOP Rejected irrelevant query: '{user_input}'")
+            return "Maaf, saya kurang memahami maksud dari pertanyaan Anda. Silakan ajukan pertanyaan yang lebih spesifik terkait prosedur EXIM."
+        
+        # Step 3: Retrieve documents (for uncertain or SOP-related queries)
+        max_retries = int(os.getenv('SOP_MAX_RETRIES', '1'))
+        retry_count = 0
+        
+        while retry_count <= max_retries:
+            # Create embedding
+            query_vector = chatbot_utils.create_embedding(client, user_input)
+            
+            # Search both collections
+            sop_results = _search_sop_collection(query_vector, user_input, limit=3)
+            case_results = _search_cases_collection(query_vector, user_input, limit=2)
+            
+            logger.info(f"SOP Search (Attempt {retry_count+1}): Found {len(sop_results)} SOPs, {len(case_results)} Cases")
+            
+            # Check if we have any results
+            if not sop_results and not case_results:
+                logger.warning(f"SOP No results found for query '{user_input}'")
+                return "Maaf, saya tidak menemukan dokumen SOP yang relevan untuk menjawab pertanyaan Anda. Mohon coba dengan kata kunci yang lebih spesifik atau hubungi tim EXIM untuk bantuan lebih lanjut."
+            
+            # Build context
+            context = _build_context(sop_results, case_results)
+            
+            # Step 4: Judge document relevance
+            relevance_result = _judge_document_relevance(user_input, context)
+            logger.info(f"SOP Relevance Judgment: {relevance_result}")
+            print(f"Relevance judgment (attempt {retry_count + 1}): {relevance_result}")
+            
+            # If documents are relevant, generate answer
+            if relevance_result["is_relevant"]:
+                response = _generate_llm_response(user_input, context)
+                
+                # Append case data if available and relevant
+                if case_results:
+                    # STRICT FILTERING
+                    relevant_cases = _filter_relevant_cases(user_input, case_results)
+                    
+                    if relevant_cases:
+                        import json
+                        # Filter only necessary fields for display
+                        cases_for_display = [
+                            {
+                                "case_no": c.get("case_no"),
+                                "question": c.get("question"),
+                                "answer": c.get("answer")
+                            }
+                            for c in relevant_cases
+                        ]
+                        response += f"\n\n<CASE_DATA>\n{json.dumps(cases_for_display)}"
+                
+                return response
+            
+            # If documents not relevant
+            # Check if this was a SOP-related query
+            if intent_result["is_relevant"]:
+                # SOP-related but docs not relevant - retry with expanded query
+                if retry_count < max_retries:
+                    logger.info(f"SOP Retrying with expanded query (attempt {retry_count + 1}/{max_retries})")
+                    print(f"Retrying with expanded query (attempt {retry_count + 1}/{max_retries})")
+                    # Expand query for retry
+                    user_input = f"{user_input} prosedur SOP dokumen"
+                    retry_count += 1
+                    continue
+                else:
+                    # Max retries reached
+                    logger.warning(f"SOP Max retries reached for query '{user_input}'")
+                    return "Maaf, saya tidak menemukan dokumen SOP yang relevan untuk menjawab pertanyaan Anda. Mohon coba dengan kata kunci yang lebih spesifik atau hubungi tim EXIM untuk bantuan lebih lanjut."
+            else:
+                # Not SOP-related and docs not relevant - give guidance
+                logger.info(f"SOP Irrelevant query and docs: '{user_input}'")
+                return "Saya kurang memahami pertanyaan Anda. Silakan ajukan pertanyaan yang lebih spesifik terkait regulasi atau prosedur EXIM."
+        
+        # Fallback (should not reach here)
+        return "Maaf, saya tidak menemukan dokumen SOP yang relevan untuk menjawab pertanyaan Anda. Mohon coba dengan kata kunci yang lebih spesifik atau hubungi tim EXIM untuk bantuan lebih lanjut."
+        
+    except Exception as e:
+        logger.error(f"Error in search_sop_exim: {e}", exc_info=True)
+        print(f"Error in search_sop_exim: {e}")
+        import traceback
+        traceback.print_exc()
         return f"❌ Error: {str(e)}\n\nSilakan coba lagi atau hubungi administrator."
 
 def show():
     """Display SOP Chatbot page"""
-    # Initialize chat history for SOP chatbot if not exists
+    # Initialize chat history
     if "messages_sop" not in st.session_state:
         st.session_state.messages_sop = []
     
@@ -293,169 +513,31 @@ def show():
     if "edit_message_index" not in st.session_state:
         st.session_state.edit_message_index = None
     
-    # Display chat history with timestamps and action buttons
+    # Display chat history
     for idx, message in enumerate(st.session_state.messages_sop):
-        with st.chat_message(message["role"]):
-            # Display timestamp if available (smaller size)
-            if "timestamp" in message:
-                st.markdown(f"<span style='font-size: 0.75rem; opacity: 0.7;'>🕐 {message['timestamp']}</span>", unsafe_allow_html=True)
-            
-            # Show edit input if this message is being edited
-            if message["role"] == "user" and st.session_state.edit_message_index == idx:
-                edited_text = st.text_area(
-                    "Edit your message:",
-                    value=message["content"],
-                    key=f"edit_input_{idx}",
-                    height=100
-                )
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    if st.button("💾 Save", key=f"save_edit_{idx}", use_container_width=True):
-                        # Update message
-                        st.session_state.messages_sop[idx]["content"] = edited_text
-                        st.session_state.messages_sop[idx]["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        # Remove all messages after this one
-                        st.session_state.messages_sop = st.session_state.messages_sop[:idx+1]
-                        
-                        # Regenerate response
-                        response = search_sop_exim(edited_text)
-                        assistant_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        st.session_state.messages_sop.append({
-                            "role": "assistant",
-                            "content": response,
-                            "timestamp": assistant_timestamp
-                        })
-                        
-                        # Save to database
-                        database.save_message(
-                            "guest",
-                            "SOP",
-                            "user",
-                            edited_text,
-                            st.session_state.current_session_id,
-                            st.session_state.messages_sop[idx]["timestamp"]
-                        )
-                        database.save_message(
-                            "guest",
-                            "SOP",
-                            "assistant",
-                            response,
-                            st.session_state.current_session_id,
-                            assistant_timestamp
-                        )
-                        
-                        st.session_state.edit_message_index = None
-                        st.rerun()
-                
-                with col2:
-                    if st.button("✖️ Cancel", key=f"cancel_edit_{idx}", use_container_width=True):
-                        st.session_state.edit_message_index = None
-                        st.rerun()
-            else:
-                # Display message content
-                st.markdown(message["content"])
-                
-                # Show action buttons for user messages (ChatGPT-like minimal buttons)
-                if message["role"] == "user":
-                    col1, col2, col3 = st.columns([10, 0.5, 0.5])
-                    with col2:
-                        st.markdown('<div class="action-btn-container">', unsafe_allow_html=True)
-                        if st.button("✏️", key=f"edit_{idx}", help="Edit message"):
-                            st.session_state.edit_message_index = idx
-                            st.rerun()
-                        st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    with col3:
-                        st.markdown('<div class="action-btn-container">', unsafe_allow_html=True)
-                        if st.button("🔄", key=f"regen_{idx}", help="Regenerate response"):
-                            # Remove all messages after this one
-                            st.session_state.messages_sop = st.session_state.messages_sop[:idx+1]
-                            
-                            # Regenerate response
-                            response = search_sop_exim(message["content"])
-                            assistant_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            
-                            st.session_state.messages_sop.append({
-                                "role": "assistant",
-                                "content": response,
-                                "timestamp": assistant_timestamp
-                            })
-                            
-                            # Save to database
-                            database.save_message(
-                                "guest",
-                                "SOP",
-                                "assistant",
-                                response,
-                                st.session_state.current_session_id,
-                                assistant_timestamp
-                            )
-                            
-                            st.rerun()
-                        st.markdown('</div>', unsafe_allow_html=True)
+        chatbot_utils.render_chat_message(
+            message, 
+            idx, 
+            "messages_sop", 
+            "edit_message_index",
+            lambda i, t: chatbot_utils.regenerate_response(i, t, "messages_sop", "SOP", search_sop_exim)
+        )
     
     # Chat input
-    if prompt := st.chat_input("Ask about EXIM SOPs... (e.g., 'document approval process')"):
-        # Capture current datetime
-        user_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Add user message to chat history with timestamp
-        st.session_state.messages_sop.append({"role": "user", "content": prompt, "timestamp": user_timestamp})
-        
-        # Check if this is the first user message in this session
-        is_first_message = len([msg for msg in st.session_state.messages_sop if msg["role"] == "user"]) == 1
-        
-        # Save to database with timestamp
-        database.save_message(
-            "guest", 
-            "SOP", 
-            "user", 
-            prompt,
-            st.session_state.current_session_id,
-            user_timestamp
-        )
-        
-        # If first message, update session title
-        if is_first_message:
-            database.update_session_title(
-                "guest",
-                "SOP",
-                st.session_state.current_session_id
-            )
-        
-        with st.chat_message("user"):
-            st.markdown(f"<span style='font-size: 0.75rem; opacity: 0.7;'>🕐 {user_timestamp}</span>", unsafe_allow_html=True)
-            st.markdown(prompt)
-        
-        # Generate response using helper function
-        response = search_sop_exim(prompt)
-        
-        # Capture response datetime
-        assistant_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Add assistant response to chat history with timestamp
-        st.session_state.messages_sop.append({"role": "assistant", "content": response, "timestamp": assistant_timestamp})
-        
-        # Save to database with timestamp
-        database.save_message(
-            "guest", 
-            "SOP", 
-            "assistant", 
-            response,
-            st.session_state.current_session_id,
-            assistant_timestamp
-        )
-        
-        with st.chat_message("assistant"):
-            st.markdown(f"<span style='font-size: 0.75rem; opacity: 0.7;'>🕐 {assistant_timestamp}</span>", unsafe_allow_html=True)
-            st.markdown(response)
-    
-    # Clear chat button in the corner (hidden, functionality moved to sidebar)
-    # col1, col2 = st.columns([6, 1])
-    # with col2:
-    #     if st.button("🗑️ Clear", key="clear_sop", use_container_width=True):
-    #         database.clear_chat_history(st.session_state.username, "SOP", st.session_state.current_session_id)
-    #         st.session_state.messages_sop = []
-    #         st.rerun()
+    if "sop_processing" not in st.session_state:
+        st.session_state.sop_processing = False
+
+    def on_input_submit():
+        st.session_state.sop_processing = True
+
+    prompt = st.chat_input(
+        "Ask about EXIM SOPs... (e.g., 'document approval process')",
+        key="sop_input",
+        disabled=st.session_state.sop_processing,
+        on_submit=on_input_submit
+    )
+
+    if st.session_state.sop_processing and prompt:
+        chatbot_utils.handle_chat_input(prompt, "messages_sop", "SOP", search_sop_exim)
+        st.session_state.sop_processing = False
+        st.rerun()
