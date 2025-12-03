@@ -109,25 +109,33 @@ def _build_insw_context(results: list) -> str:
             item += "   [Ketentuan Impor Umum]:\n"
             for r in import_regs:
                 item += f"    - {r.get('name', '')}\n"
-                if r.get('legal'): item += f"      Legal: {r.get('legal')}\n"
+                if r.get('legal'): item += f"      Regulasi: {r.get('legal')}\n"
+                if r.get('komoditi'): item += f"      Komoditi: {r.get('komoditi')}\n"
+                if r.get('deskripsi'): item += f"      Deskripsi: {r.get('deskripsi')}\n"
 
         if import_border:
             item += "   [Ketentuan Impor Border (Pengawasan di Perbatasan)]:\n"
             for r in import_border:
                 item += f"    - {r.get('name', '')}\n"
-                if r.get('legal'): item += f"      Legal: {r.get('legal')}\n"
+                if r.get('legal'): item += f"      Regulasi: {r.get('legal')}\n"
+                if r.get('komoditi'): item += f"      Komoditi: {r.get('komoditi')}\n"
+                if r.get('deskripsi'): item += f"      Deskripsi: {r.get('deskripsi')}\n"
 
         if import_post_border:
             item += "   [Ketentuan Impor Post-Border (Pengawasan Setelah Keluar Pelabuhan)]:\n"
             for r in import_post_border:
                 item += f"    - {r.get('name', '')}\n"
-                if r.get('legal'): item += f"      Legal: {r.get('legal')}\n"
+                if r.get('legal'): item += f"      Regulasi: {r.get('legal')}\n"
+                if r.get('komoditi'): item += f"      Komoditi: {r.get('komoditi')}\n"
+                if r.get('deskripsi'): item += f"      Deskripsi: {r.get('deskripsi')}\n"
 
         if export_regs:
             item += "   [Ketentuan Ekspor]:\n"
             for r in export_regs:
                 item += f"    - {r.get('name', '')}\n"
-                if r.get('legal'): item += f"      Legal: {r.get('legal')}\n"
+                if r.get('legal'): item += f"      Regulasi: {r.get('legal')}\n"
+                if r.get('komoditi'): item += f"      Komoditi: {r.get('komoditi')}\n"
+                if r.get('deskripsi'): item += f"      Deskripsi: {r.get('deskripsi')}\n"
 
         # BC Documents
         if bc_documents:
@@ -230,15 +238,19 @@ Peran Anda:
 Format Jawaban:
 1. **Ringkasan**: Jawaban singkat tentang HS Code, uraian barang, dan status regulasinya.
 2. **Detail Regulasi**:
-   - **Impor (Border)**: Ketentuan yang harus dipenuhi di perbatasan (jika ada).
-   - **Impor (Post-Border)**: Ketentuan yang harus dipenuhi setelah keluar pelabuhan (jika ada).
-   - **Ekspor**: Ketentuan ekspor (jika ada).
+   - **Impor (Border)**: Ketentuan yang harus dipenuhi di perbatasan. Tampilkan detail:
+     - Nama Regulasi
+     - Regulasi (Dasar Hukum)
+     - Komoditi
+     - Deskripsi
+   - **Impor (Post-Border)**: Ketentuan yang harus dipenuhi setelah keluar pelabuhan. Tampilkan detail yang sama.
+   - **Ekspor**: Ketentuan ekspor.
 3. **Dokumen yang Diperlukan**: Dokumen BC dan perizinan yang dibutuhkan.
 4. **Dasar Hukum**: Peraturan yang menjadi dasar ketentuan.
 5. **Link Referensi**: Sertakan link INSW jika tersedia.
 
 Penting:
-- Awali jawaban dengan menyebutkan tanggal data INSW yang digunakan (jika tersedia di konteks).
+- Sebutkan tanggal data INSW (jika ada) secara natural di dalam kalimat pembuka.
 - Selalu sebutkan HS Code lengkap (8 digit)
 - Bedakan dengan jelas antara regulasi Border dan Post-Border
 - Jika ada beberapa HS Code relevan, jelaskan detailnya satu per satu
@@ -260,7 +272,7 @@ Berikan jawaban yang komprehensif berdasarkan konteks di atas."""
             model=os.getenv("LLM_MODEL", "gemini-2.5-flash"),
             contents=[
                 {"role": "user", "parts": [{"text": system_prompt}]},
-                {"role": "model", "parts": [{"text": "Saya mengerti. Saya akan menjawab pertanyaan tentang regulasi INSW dengan mengutip HS Code, ketentuan import/export (Border/Post-Border), dan dasar hukum yang relevan, serta menyebutkan tanggal data di awal jawaban."}]},
+                {"role": "model", "parts": [{"text": "Saya mengerti. Saya akan menyampaikan informasi regulasi INSW (HS Code, Lartas, dll) dengan menyertakan tanggal data secara natural di awal penjelasan."}]},
                 {"role": "user", "parts": [{"text": user_message}]}
             ]
         )
