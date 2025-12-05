@@ -38,6 +38,7 @@ def check_password():
 
     # Custom CSS for the login page
     st.markdown("""
+        <style>
         /* Target the login form container */
         [data-testid="stForm"] {
             background-color: var(--secondary-background-color);
